@@ -1,0 +1,16 @@
+[package]
+name = "vocab_trainer"
+version = "0.0.0"
+edition = "2021"
+resolver = "2"
+
+[dependencies]
+nix = "0.24.1"
+
+[build-dependencies]
+bindgen = "0.60.1"
+pkg-config = "0.3.25"
+
+[[bin]]
+name = "main"
+path = "src/main.rs"
