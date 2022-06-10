@@ -123,77 +123,6 @@ struct Phrase {
     comment: String,
 }
 
-struct GameLoop {
-    state: GameState,
-    ui: GameUI,
-}
-
-impl GameLoop {
-    fn run(&mut self) {
-        'outer: while let Some(question) = self.state.next_question() {
-            let mut tries = 0;
-
-            self.ui.notify_question(&question);
-
-            loop {
-                let hint = QuestionHint {
-                    entry: question.entry.clone(),
-                    tries,
-                };
-                match self.ui.wait_for_input(hint) {
-                    UIResponse::Return(input) => {
-                        if self.state.answer_question(&question, &input) {
-                            self.ui.notify_correct(&question, tries);
-                            break;
-                        } else {
-                            self.ui.notify_incorrect(&question, tries);
-                            tries += 1;
-                        }
-                    }
-                    UIResponse::Error(error) => {
-                        self.ui.notify_error(error);
-                        break 'outer;
-                    }
-                    UIResponse::Quit => break 'outer,
-                }
-            }
-        }
-    }
-}
-
-struct GameState {
-    entries: Vec<Rc<Entry>>,
-    progress: usize,
-}
-
-impl GameState {
-    fn new(entries: Vec<Rc<Entry>>) -> Self {
-        Self {
-            entries,
-            progress: 0,
-        }
-    }
-
-    fn next_question(&mut self) -> Option<Question> {
-        if self.progress < self.entries.len() {
-            let i = self.progress;
-            self.progress += 1;
-            Some(Question {
-                index: i,
-                entry: self.entries[i].clone(),
-            })
-        } else {
-            None
-        }
-    }
-
-    fn answer_question(&mut self, question: &Question, answer: &str) -> bool {
-        let is_correct = question.entry.term == answer;
-        // TODO: Record scores
-        is_correct
-    }
-}
-
 struct GameUI {
     readline: Editor<QuestionHint>,
 }
@@ -205,7 +134,35 @@ impl GameUI {
         Self { readline }
     }
 
-    fn notify_question(&mut self, question: &Question) {
+    fn run(&mut self, state: &mut GameState) {
+        'outer: while let Some(question) = state.next_question() {
+            self.notify_question(&question, &state);
+
+            loop {
+                let hint = QuestionHint {
+                    entry: question.entry.clone(),
+                    tries: state.tries,
+                };
+                match self.wait_for_input(hint) {
+                    UIResponse::Return(input) => {
+                        if state.answer_question(&question, &input) {
+                            self.notify_correct(&question, &state);
+                            break;
+                        } else {
+                            self.notify_incorrect(&question, &state);
+                        }
+                    }
+                    UIResponse::Error(error) => {
+                        self.notify_error(error);
+                        break 'outer;
+                    }
+                    UIResponse::Quit => break 'outer,
+                }
+            }
+        }
+    }
+
+    fn notify_question(&mut self, question: &Question, _state: &GameState) {
         print!(
             "{}{}Q{}{} ",
             termion::style::Bold,
@@ -237,22 +194,22 @@ impl GameUI {
         println!("/");
     }
 
-    fn notify_correct(&mut self, question: &Question, tries: usize) {
-        if tries > 0 {
+    fn notify_correct(&mut self, question: &Question, state: &GameState) {
+        if state.tries > 0 {
             println!(
                 "{}{}> {} {}({} {}){}",
                 termion::cursor::Up(1),
                 termion::clear::CurrentLine,
                 question.entry.term,
                 termion::color::Fg(termion::color::LightRed),
-                tries,
-                if tries == 1 { "mistake" } else { "mistakes" },
+                state.tries,
+                if state.tries == 1 { "mistake" } else { "mistakes" },
                 termion::style::Reset,
             );
         }
     }
 
-    fn notify_incorrect(&mut self, _question: &Question, _tries: usize) {
+    fn notify_incorrect(&mut self, _question: &Question, _state: &GameState) {
         println!(
             "{}{}{}",
             termion::cursor::Up(1),
@@ -285,6 +242,43 @@ impl GameUI {
     }
 }
 
+struct GameState {
+    entries: Vec<Rc<Entry>>,
+    progress: usize,
+    tries: usize,
+}
+
+impl GameState {
+    fn new(entries: Vec<Rc<Entry>>) -> Self {
+        Self {
+            entries,
+            progress: 0,
+            tries: 0,
+        }
+    }
+
+    fn next_question(&mut self) -> Option<Question> {
+        if self.progress < self.entries.len() {
+            let i = self.progress;
+            self.progress += 1;
+            self.tries = 0;
+            Some(Question {
+                index: i,
+                entry: self.entries[i].clone(),
+            })
+        } else {
+            None
+        }
+    }
+
+    fn answer_question(&mut self, question: &Question, answer: &str) -> bool {
+        let is_correct = question.entry.term == answer;
+        // TODO: Record scores
+        self.tries += 1;
+        is_correct
+    }
+}
+
 enum UIResponse {
     Return(String),
     Error(ReadlineError),
@@ -304,9 +298,7 @@ fn load_entries<R: Read>(handle: R) -> io::Result<Vec<Rc<Entry>>> {
 
 fn main() {
     let entries = load_entries(io::stdin()).expect("failed to load entries");
-    let mut game_loop = GameLoop {
-        state: GameState::new(entries),
-        ui: GameUI::new(),
-    };
-    game_loop.run();
+    let mut state = GameState::new(entries);
+    let mut ui = GameUI::new();
+    ui.run(&mut state)
 }
