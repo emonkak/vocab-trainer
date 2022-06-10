@@ -143,10 +143,10 @@ impl GameLoop {
                 match self.ui.wait_for_input(hint) {
                     UIResponse::Return(input) => {
                         if self.state.answer_question(&question, &input) {
-                            self.ui.notify_correct(&question);
+                            self.ui.notify_correct(&question, tries);
                             break;
                         } else {
-                            self.ui.notify_incorrect(&question);
+                            self.ui.notify_incorrect(&question, tries);
                             tries += 1;
                         }
                     }
@@ -237,9 +237,22 @@ impl GameUI {
         println!("/");
     }
 
-    fn notify_correct(&mut self, _question: &Question) {}
+    fn notify_correct(&mut self, question: &Question, tries: usize) {
+        if tries > 0 {
+            println!(
+                "{}{}> {} {}({} {}){}",
+                termion::cursor::Up(1),
+                termion::clear::CurrentLine,
+                question.entry.term,
+                termion::color::Fg(termion::color::LightRed),
+                tries,
+                if tries == 1 { "mistake" } else { "mistakes" },
+                termion::style::Reset,
+            );
+        }
+    }
 
-    fn notify_incorrect(&mut self, _question: &Question) {
+    fn notify_incorrect(&mut self, _question: &Question, _tries: usize) {
         println!(
             "{}{}{}",
             termion::cursor::Up(1),
