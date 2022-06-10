@@ -3,9 +3,13 @@ extern crate rustyline_derive;
 extern crate termion;
 
 use std::borrow::Cow;
-use std::io::{self, BufRead as _, BufReader, Read};
+use std::collections::HashMap;
+use std::env;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, BufRead as _, BufReader, BufWriter, Read, Write};
 use std::iter::Peekable;
 use std::mem;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::str::Chars;
 
@@ -134,34 +138,6 @@ impl GameUI {
         Self { readline }
     }
 
-    fn run(&mut self, state: &mut GameState) {
-        'outer: while let Some(question) = state.next_question() {
-            self.notify_question(&question, &state);
-
-            loop {
-                let hint = QuestionHint {
-                    entry: question.entry.clone(),
-                    tries: state.tries,
-                };
-                match self.wait_for_input(hint) {
-                    UIResponse::Return(input) => {
-                        if state.answer_question(&question, &input) {
-                            self.notify_correct(&question, &state);
-                            break;
-                        } else {
-                            self.notify_incorrect(&question, &state);
-                        }
-                    }
-                    UIResponse::Error(error) => {
-                        self.notify_error(error);
-                        break 'outer;
-                    }
-                    UIResponse::Quit => break 'outer,
-                }
-            }
-        }
-    }
-
     fn notify_question(&mut self, question: &Question, _state: &GameState) {
         print!(
             "{}{}Q{}{} ",
@@ -203,7 +179,11 @@ impl GameUI {
                 question.entry.term,
                 termion::color::Fg(termion::color::LightRed),
                 state.tries,
-                if state.tries == 1 { "mistake" } else { "mistakes" },
+                if state.tries == 1 {
+                    "mistake"
+                } else {
+                    "mistakes"
+                },
                 termion::style::Reset,
             );
         }
@@ -242,16 +222,20 @@ impl GameUI {
     }
 }
 
+type Scores = HashMap<String, i32>;
+
 struct GameState {
     entries: Vec<Rc<Entry>>,
+    scores: Scores,
     progress: usize,
     tries: usize,
 }
 
 impl GameState {
-    fn new(entries: Vec<Rc<Entry>>) -> Self {
+    fn new(entries: Vec<Rc<Entry>>, scores: Scores) -> Self {
         Self {
             entries,
+            scores,
             progress: 0,
             tries: 0,
         }
@@ -271,9 +255,20 @@ impl GameState {
         }
     }
 
-    fn answer_question(&mut self, question: &Question, answer: &str) -> bool {
+    fn answer_question(&mut self, question: &Question, answer: String) -> bool {
+        use std::collections::hash_map::Entry;
         let is_correct = question.entry.term == answer;
-        // TODO: Record scores
+        if is_correct {
+            let score = if self.tries == 0 { 1 } else { -1 };
+            match self.scores.entry(answer) {
+                Entry::Occupied(mut entry) => {
+                    entry.insert(entry.get() + score);
+                }
+                Entry::Vacant(entry) => {
+                    entry.insert(score);
+                }
+            }
+        }
         self.tries += 1;
         is_correct
     }
@@ -296,9 +291,76 @@ fn load_entries<R: Read>(handle: R) -> io::Result<Vec<Rc<Entry>>> {
     Ok(entries)
 }
 
+fn load_scores<P: AsRef<Path>>(path: P) -> io::Result<Scores> {
+    let mut scores = HashMap::new();
+    if path.as_ref().exists() {
+        let file = File::open(path)?;
+        let reader = BufReader::new(file);
+        for line in reader.lines() {
+            if let Some((term, score)) = line?.split_once('\t') {
+                let score = score.parse::<i32>().unwrap_or(0);
+                scores.insert(term.to_owned(), score);
+            }
+        }
+    }
+    Ok(scores)
+}
+
+fn save_scores<P: AsRef<Path>>(path: P, scores: Scores) -> io::Result<()> {
+    if let Some(parent) = path.as_ref().parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let file = OpenOptions::new().write(true).create(true).open(path)?;
+    let mut writer = BufWriter::new(file);
+    for (term, score) in scores {
+        writeln!(writer, "{}\t{}", term, score)?;
+    }
+    Ok(())
+}
+
+fn detect_config_directory() -> PathBuf {
+    env::var("XDG_CONFIG_HOME")
+        .map(|config_home| Path::new(&config_home).to_path_buf())
+        .or_else(|_| env::var("HOME").map(|home_dir| Path::new(&home_dir).join(".config")))
+        .unwrap_or_else(|_| env::temp_dir())
+        .join("vocab-trainer")
+}
+
+fn run_loop(ui: &mut GameUI, state: &mut GameState) {
+    'outer: while let Some(question) = state.next_question() {
+        ui.notify_question(&question, &state);
+
+        loop {
+            let hint = QuestionHint {
+                entry: question.entry.clone(),
+                tries: state.tries,
+            };
+            match ui.wait_for_input(hint) {
+                UIResponse::Return(input) => {
+                    if state.answer_question(&question, input) {
+                        ui.notify_correct(&question, &state);
+                        break;
+                    } else {
+                        ui.notify_incorrect(&question, &state);
+                    }
+                }
+                UIResponse::Error(error) => {
+                    ui.notify_error(error);
+                    break 'outer;
+                }
+                UIResponse::Quit => break 'outer,
+            }
+        }
+    }
+}
+
 fn main() {
+    let config_dir = detect_config_directory();
+    let score_path = config_dir.join("scores.txt");
     let entries = load_entries(io::stdin()).expect("failed to load entries");
-    let mut state = GameState::new(entries);
+    let scores = load_scores(&score_path).expect("failed to load scores");
+    let mut state = GameState::new(entries, scores);
     let mut ui = GameUI::new();
-    ui.run(&mut state)
+    run_loop(&mut ui, &mut state);
+    save_scores(&score_path, state.scores).expect("failed to save scores");
 }
