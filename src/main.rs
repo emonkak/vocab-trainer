@@ -5,6 +5,7 @@ extern crate termion;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::env;
+use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead as _, BufReader, BufWriter, Read, Write};
 use std::iter::Peekable;
@@ -81,7 +82,7 @@ struct Question {
 #[derive(Debug, Completer, Helper, Validator)]
 struct QuestionHint {
     entry: Rc<Entry>,
-    tries: usize,
+    mistakes: usize,
 }
 
 impl Hinter for QuestionHint {
@@ -98,7 +99,7 @@ impl Hinter for QuestionHint {
                 if !c.is_ascii_alphabetic() {
                     symbols += 1;
                     c
-                } else if i - symbols < self.tries {
+                } else if i - symbols < self.mistakes {
                     c
                 } else {
                     '_'
@@ -171,19 +172,28 @@ impl GameUI {
     }
 
     fn notify_correct(&mut self, question: &Question, state: &GameState) {
-        if state.tries > 0 {
+        let score = state.get_score(&question.entry.term).unwrap_or_default();
+        if state.mistakes == 0 {
             println!(
-                "{}{}> {} {}({} {}){}",
+                "{}{}> {} {}(perfect, {} try, {:.}% correct){}",
+                termion::cursor::Up(1),
+                termion::clear::CurrentLine,
+                question.entry.term,
+                termion::color::Fg(termion::color::LightGreen),
+                OrdinalNum(score.total_tries()),
+                (score.correct_rate() * 100.0).round(),
+                termion::style::Reset,
+            );
+        } else {
+            println!(
+                "{}{}> {} {}({} mistakes, {} try, {:.}% correct){}",
                 termion::cursor::Up(1),
                 termion::clear::CurrentLine,
                 question.entry.term,
                 termion::color::Fg(termion::color::LightRed),
-                state.tries,
-                if state.tries == 1 {
-                    "mistake"
-                } else {
-                    "mistakes"
-                },
+                state.mistakes,
+                OrdinalNum(score.total_tries()),
+                (score.correct_rate() * 100.0).round(),
                 termion::style::Reset,
             );
         }
@@ -222,13 +232,63 @@ impl GameUI {
     }
 }
 
-type Scores = HashMap<String, i32>;
+type Scores = HashMap<String, Score>;
+
+#[derive(Clone, Copy, Debug, Default)]
+struct Score {
+    correct: u32,
+    incorrect: u32,
+}
+
+impl Score {
+    fn increment_correct(&self) -> Self {
+        Self {
+            correct: self.correct + 1,
+            incorrect: self.incorrect,
+        }
+    }
+
+    fn increment_incorrect(&self) -> Self {
+        Self {
+            correct: self.correct,
+            incorrect: self.incorrect + 1,
+        }
+    }
+
+    fn correct_rate(&self) -> f32 {
+        let tries = self.correct + self.incorrect;
+        if tries == 0 {
+            1.0
+        } else {
+            self.correct as f32 / tries as f32
+        }
+    }
+
+    fn total_tries(&self) -> u32 {
+        self.correct + self.incorrect
+    }
+}
+
+struct OrdinalNum(u32);
+
+impl fmt::Display for OrdinalNum {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)?;
+        match self.0 {
+            1 => f.write_str("st")?,
+            2 => f.write_str("nd")?,
+            3 => f.write_str("rd")?,
+            _ => f.write_str("th")?,
+        }
+        Ok(())
+    }
+}
 
 struct GameState {
     entries: Vec<Rc<Entry>>,
     scores: Scores,
     progress: usize,
-    tries: usize,
+    mistakes: usize,
 }
 
 impl GameState {
@@ -237,7 +297,7 @@ impl GameState {
             entries,
             scores,
             progress: 0,
-            tries: 0,
+            mistakes: 0,
         }
     }
 
@@ -245,7 +305,7 @@ impl GameState {
         if self.progress < self.entries.len() {
             let i = self.progress;
             self.progress += 1;
-            self.tries = 0;
+            self.mistakes = 0;
             Some(Question {
                 index: i,
                 entry: self.entries[i].clone(),
@@ -259,18 +319,38 @@ impl GameState {
         use std::collections::hash_map::Entry;
         let is_correct = question.entry.term == answer;
         if is_correct {
-            let score = if self.tries == 0 { 1 } else { -1 };
             match self.scores.entry(answer) {
                 Entry::Occupied(mut entry) => {
-                    entry.insert(entry.get() + score);
+                    let score = if self.mistakes == 0 {
+                        entry.get().increment_correct()
+                    } else {
+                        entry.get().increment_incorrect()
+                    };
+                    entry.insert(score);
                 }
                 Entry::Vacant(entry) => {
+                    let score = if self.mistakes == 0 {
+                        Score {
+                            correct: 1,
+                            incorrect: 0,
+                        }
+                    } else {
+                        Score {
+                            correct: 0,
+                            incorrect: 1,
+                        }
+                    };
                     entry.insert(score);
                 }
             }
+        } else {
+            self.mistakes += 1;
         }
-        self.tries += 1;
         is_correct
+    }
+
+    fn get_score(&self, term: &str) -> Option<Score> {
+        self.scores.get(term).copied()
     }
 }
 
@@ -297,8 +377,13 @@ fn load_scores<P: AsRef<Path>>(path: P) -> io::Result<Scores> {
         let file = File::open(path)?;
         let reader = BufReader::new(file);
         for line in reader.lines() {
-            if let Some((term, score)) = line?.split_once('\t') {
-                let score = score.parse::<i32>().unwrap_or(0);
+            let line = line?;
+            let mut parts = line.split('\t');
+            if let Some(term) = parts.next() {
+                let score = Score {
+                    correct: parts.next().and_then(|part| str::parse(part).ok()).unwrap_or(0),
+                    incorrect: parts.next().and_then(|part| str::parse(part).ok()).unwrap_or(0),
+                };
                 scores.insert(term.to_owned(), score);
             }
         }
@@ -313,7 +398,7 @@ fn save_scores<P: AsRef<Path>>(path: P, scores: Scores) -> io::Result<()> {
     let file = OpenOptions::new().write(true).create(true).open(path)?;
     let mut writer = BufWriter::new(file);
     for (term, score) in scores {
-        writeln!(writer, "{}\t{}", term, score)?;
+        writeln!(writer, "{}\t{}\t{}", term, score.correct, score.incorrect)?;
     }
     Ok(())
 }
@@ -333,7 +418,7 @@ fn run_loop(ui: &mut GameUI, state: &mut GameState) {
         loop {
             let hint = QuestionHint {
                 entry: question.entry.clone(),
-                tries: state.tries,
+                mistakes: state.mistakes,
             };
             match ui.wait_for_input(hint) {
                 UIResponse::Return(input) => {
