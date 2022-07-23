@@ -208,33 +208,27 @@ impl GameUI {
         );
     }
 
-    fn notify_error(&mut self, error: ReadlineError) {
-        eprintln!("Error: {}", error);
-    }
-
-    fn wait_for_input(&mut self, hint: QuestionHint) -> UIResponse {
+    fn wait_for_input(&mut self, hint: QuestionHint) -> Result<UIResponse, ReadlineError> {
         self.readline.set_helper(Some(hint));
         match self.readline.readline("> ") {
             Ok(input) if input.starts_with(":") => {
-                if input
-                    .get(1..)
-                    .map_or(false, |input| "quit".starts_with(input))
-                {
-                    UIResponse::Quit
+                let command = input.get(1..).unwrap_or_default();
+                if "quit".starts_with(command) {
+                    Ok(UIResponse::Quit)
                 } else {
-                    UIResponse::Return(input)
+                    Ok(UIResponse::Return(input))
                 }
             }
-            Ok(input) => UIResponse::Return(input),
-            Err(ReadlineError::Interrupted | ReadlineError::Eof) => UIResponse::Quit,
-            Err(error) => UIResponse::Error(error),
+            Ok(input) => Ok(UIResponse::Return(input)),
+            Err(ReadlineError::Interrupted | ReadlineError::Eof) => Ok(UIResponse::Quit),
+            Err(error) => Err(error),
         }
     }
 }
 
 type Scores = HashMap<String, Score>;
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct Score {
     correct: u32,
     incorrect: u32,
@@ -350,13 +344,12 @@ impl GameState {
     }
 
     fn get_score(&self, term: &str) -> Option<Score> {
-        self.scores.get(term).copied()
+        self.scores.get(term).cloned()
     }
 }
 
 enum UIResponse {
     Return(String),
-    Error(ReadlineError),
     Quit,
 }
 
@@ -381,8 +374,14 @@ fn load_scores<P: AsRef<Path>>(path: P) -> io::Result<Scores> {
             let mut parts = line.split('\t');
             if let Some(term) = parts.next() {
                 let score = Score {
-                    correct: parts.next().and_then(|part| str::parse(part).ok()).unwrap_or(0),
-                    incorrect: parts.next().and_then(|part| str::parse(part).ok()).unwrap_or(0),
+                    correct: parts
+                        .next()
+                        .and_then(|part| str::parse(part).ok())
+                        .unwrap_or(0),
+                    incorrect: parts
+                        .next()
+                        .and_then(|part| str::parse(part).ok())
+                        .unwrap_or(0),
                 };
                 scores.insert(term.to_owned(), score);
             }
@@ -411,7 +410,7 @@ fn detect_config_directory() -> PathBuf {
         .join("vocab-trainer")
 }
 
-fn run_loop(ui: &mut GameUI, state: &mut GameState) {
+fn run_loop(ui: &mut GameUI, state: &mut GameState) -> Result<(), ReadlineError> {
     'outer: while let Some(question) = state.next_question() {
         ui.notify_question(&question, &state);
 
@@ -420,7 +419,7 @@ fn run_loop(ui: &mut GameUI, state: &mut GameState) {
                 entry: question.entry.clone(),
                 mistakes: state.mistakes,
             };
-            match ui.wait_for_input(hint) {
+            match ui.wait_for_input(hint)? {
                 UIResponse::Return(input) => {
                     if state.answer_question(&question, input) {
                         ui.notify_correct(&question, &state);
@@ -429,23 +428,20 @@ fn run_loop(ui: &mut GameUI, state: &mut GameState) {
                         ui.notify_incorrect(&question, &state);
                     }
                 }
-                UIResponse::Error(error) => {
-                    ui.notify_error(error);
-                    break 'outer;
-                }
                 UIResponse::Quit => break 'outer,
             }
         }
     }
+    Ok(())
 }
 
 fn main() {
     let config_dir = detect_config_directory();
     let score_path = config_dir.join("scores.txt");
-    let entries = load_entries(io::stdin()).expect("failed to load entries");
-    let scores = load_scores(&score_path).expect("failed to load scores");
+    let entries = load_entries(io::stdin()).expect("load entries");
+    let scores = load_scores(&score_path).expect("load scores");
     let mut state = GameState::new(entries, scores);
     let mut ui = GameUI::new();
-    run_loop(&mut ui, &mut state);
-    save_scores(&score_path, state.scores).expect("failed to save scores");
+    run_loop(&mut ui, &mut state).expect("run loop");
+    save_scores(&score_path, state.scores).expect("save scores");
 }
