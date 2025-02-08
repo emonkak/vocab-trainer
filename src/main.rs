@@ -175,7 +175,7 @@ impl GameUI {
         let score = state.get_score(&question.entry.term).unwrap_or_default();
         if state.mistakes == 0 {
             println!(
-                "{}{}> {} {}(perfect, {} try, {:.}% correct){}",
+                "{}{}> {} {}(perfect, {} try, {}% correct){}",
                 termion::cursor::Up(1),
                 termion::clear::CurrentLine,
                 question.entry.term,
@@ -186,7 +186,7 @@ impl GameUI {
             );
         } else {
             println!(
-                "{}{}> {} {}({} mistakes, {} try, {:.}% correct){}",
+                "{}{}> {} {}({} mistakes, {} try, {}% correct){}",
                 termion::cursor::Up(1),
                 termion::clear::CurrentLine,
                 question.entry.term,
